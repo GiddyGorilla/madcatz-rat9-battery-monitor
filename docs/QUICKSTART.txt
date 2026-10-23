@@ -1,0 +1,44 @@
+MAD CATZ R.A.T. 9 BATTERY MONITOR
+=================================
+
+QUICK START
+
+1. Make sure Mad Catz SmartTechnology is installed and the R.A.T. 9 works.
+2. Extract the release ZIP to a permanent folder.
+3. Start RAT9BatteryTray.exe.
+4. Left-click the percentage icon in the system tray.
+5. Click outside the detail panel to close it.
+
+The tray icon updates automatically (about every 12 seconds while idle and
+every 5 seconds while charging or below 15%).
+
+RIGHT-CLICK MENU
+
+- Open battery details
+- Refresh now
+- Pin the detail panel to the desktop
+- Start with Windows
+- Exit
+
+TIME REMAINING
+
+The first estimate uses the R.A.T. 9's approximate 9-hour maximum gaming
+runtime. The app saves local discharge history and narrows/adjusts the range
+as it learns how the battery is used.
+
+ALERTS
+
+The app can notify at 20%, 10%, and 5%, when charging is complete, when the
+mouse disconnects, and when it reconnects.
+
+PRIVACY
+
+No telemetry or network access. History is stored at:
+%LOCALAPPDATA%\MadCatzRat9BatteryTray\history-v1.txt
+
+TROUBLESHOOTING
+
+If the icon is hidden, enable it under:
+Settings > Personalization > Taskbar > Other system tray icons
+
+Run RAT9BatteryProbe.exe in a terminal for a diagnostic reading.

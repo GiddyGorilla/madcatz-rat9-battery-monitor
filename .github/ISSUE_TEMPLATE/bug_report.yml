@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a problem with the R.A.T. 9 battery monitor
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include tokens, credentials, or unredacted personal paths.
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2 (build number)
+    validations:
+      required: true
+  - type: input
+    id: smarttechnology
+    attributes:
+      label: SmartTechnology version
+      placeholder: 7.0.45.2
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the expected and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: Probe output
+      description: Paste the output of RAT9BatteryProbe.exe after redacting personal paths.
+      render: text
