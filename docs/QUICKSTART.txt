@@ -12,10 +12,15 @@ QUICK START
 The tray icon updates automatically (about every 12 seconds while idle and
 every 5 seconds while charging or below 15%).
 
+If battery-driver access hangs during a battery swap, the monitor automatically
+restarts its isolated reader after eight seconds. You can also choose
+"Återanslut musen" from the right-click menu.
+
 RIGHT-CLICK MENU
 
 - Open battery details
 - Refresh now
+- Reconnect mouse
 - Pin the detail panel to the desktop
 - Start with Windows
 - Exit

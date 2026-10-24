@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## 1.0.1 — 2026-10-24
+
+### Fixed
+
+- Isolated battery-driver access in a supervised worker process.
+- Automatically terminate and restart the worker if a vendor read hangs for
+  more than eight seconds, such as during a R.A.T. 9 battery swap.
+- Release the stale driver handle without requiring a tray or Windows restart.
+- Added a manual **Reconnect mouse** action to the tray menu.
+
 ## 1.0.0 — 2026-10-24
 
 ### Added

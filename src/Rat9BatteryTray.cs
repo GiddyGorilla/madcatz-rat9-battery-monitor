@@ -1,11 +1,13 @@
 // R.A.T. 9 tray and detail-popup application.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -18,11 +20,25 @@ namespace Rat9Battery
             @"Local\MadCatzRat9BatteryTray";
         private const string ActivateEventName =
             @"Local\MadCatzRat9BatteryTrayActivate";
+        internal const string BatteryWorkerArgument =
+            "--battery-worker";
 
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
             SaitekAssemblyResolver.Install();
+
+            if (args != null &&
+                args.Length > 0 &&
+                string.Equals(
+                    args[0],
+                    BatteryWorkerArgument,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                BatteryWorkerHost.Run();
+                return;
+            }
+
             EnableDpiAwareness();
 
             using (Mutex instanceMutex = new Mutex(
@@ -89,6 +105,11 @@ namespace Rat9Battery
             }
         }
 
+        internal static void LogWorkerException(Exception exception)
+        {
+            LogException(exception);
+        }
+
         private static void LogException(Exception exception)
         {
             if (exception == null)
@@ -126,19 +147,15 @@ namespace Rat9Battery
         private const string SettingsKey =
             @"Software\MadCatzRat9BatteryTray";
 
-        private readonly Rat9BatteryReader _reader =
-            new Rat9BatteryReader();
         private readonly BatteryHistoryStore _historyStore;
         private readonly BatteryTimeEstimator _timeEstimator;
         private readonly NotifyIcon _notifyIcon;
         private readonly ContextMenuStrip _menu;
         private readonly Control _uiInvoker;
         private BatteryDetailForm _details;
-        private readonly Thread _pollThread;
         private readonly Thread _activationThread;
+        private readonly System.Windows.Forms.Timer _workerWatchdog;
         private readonly EventWaitHandle _activateEvent;
-        private readonly ManualResetEvent _refreshEvent =
-            new ManualResetEvent(false);
         private readonly ToolStripMenuItem _showDetailsItem;
         private readonly ToolStripMenuItem _pinItem;
         private readonly ToolStripMenuItem _startupItem;
@@ -146,10 +163,13 @@ namespace Rat9Battery
             new HashSet<int>();
 
         private Icon _currentIcon;
+        private Process _batteryWorker;
         private BatteryReading _lastReading;
         private BatteryTimeEstimate _lastEstimate;
         private BatteryStatus? _previousStatus;
-        private volatile int _nextPollMilliseconds = 12000;
+        private volatile bool _workerQueryInFlight;
+        private long _workerQueryStartedUtcTicks;
+        private bool _workerRestartScheduled;
         private bool _stopping;
         private bool _fullChargeNotified;
 
@@ -172,7 +192,12 @@ namespace Rat9Battery
             ToolStripMenuItem refreshItem = new ToolStripMenuItem(
                 "Uppdatera nu",
                 null,
-                delegate { _refreshEvent.Set(); });
+                delegate { ScheduleWorkerRestart(0, false); });
+
+            ToolStripMenuItem reconnectItem = new ToolStripMenuItem(
+                "Återanslut musen",
+                null,
+                delegate { ScheduleWorkerRestart(0, true); });
 
             _pinItem = new ToolStripMenuItem(
                 "Fäst detaljpanelen på skrivbordet",
@@ -194,6 +219,7 @@ namespace Rat9Battery
             _menu.Items.Add(_showDetailsItem);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(refreshItem);
+            _menu.Items.Add(reconnectItem);
             _menu.Items.Add(_pinItem);
             _menu.Items.Add(_startupItem);
             _menu.Items.Add(new ToolStripSeparator());
@@ -216,10 +242,13 @@ namespace Rat9Battery
                 _details.ShowPinned();
             }
 
-            _pollThread = new Thread(PollLoop);
-            _pollThread.IsBackground = true;
-            _pollThread.Name = "R.A.T. 9 battery poller";
-            _pollThread.Start();
+            _workerWatchdog = new System.Windows.Forms.Timer
+            {
+                Interval = 1000
+            };
+            _workerWatchdog.Tick += WorkerWatchdogTick;
+            _workerWatchdog.Start();
+            StartBatteryWorker();
 
             _activationThread = new Thread(ActivationLoop);
             _activationThread.IsBackground = true;
@@ -227,26 +256,316 @@ namespace Rat9Battery
             _activationThread.Start();
         }
 
-        private void PollLoop()
+        private void WorkerWatchdogTick(object sender, EventArgs args)
         {
-            while (!_stopping)
+            if (_stopping || !_workerQueryInFlight)
             {
-                BatteryReading reading = _reader.Read();
-                try
+                return;
+            }
+
+            DateTime started = new DateTime(
+                Interlocked.Read(ref _workerQueryStartedUtcTicks),
+                DateTimeKind.Utc);
+            if (DateTime.UtcNow - started < TimeSpan.FromSeconds(8))
+            {
+                return;
+            }
+
+            _workerQueryInFlight = false;
+            ApplyReading(BatteryReading.Create(
+                BatteryStatus.Unknown,
+                null,
+                -1,
+                false,
+                "återansluter musen"));
+            ShowBalloon(
+                "Batteriläsningen fastnade vid batteribytet. " +
+                "Musanslutningen återställs automatiskt.",
+                ToolTipIcon.Warning);
+            ScheduleWorkerRestart(250, false);
+        }
+
+        private void StartBatteryWorker()
+        {
+            if (_stopping ||
+                (_batteryWorker != null && !_batteryWorker.HasExited))
+            {
+                return;
+            }
+
+            Process process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = Application.ExecutablePath,
+                Arguments = Program.BatteryWorkerArgument,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            process.EnableRaisingEvents = true;
+            process.OutputDataReceived += delegate(
+                object sender,
+                DataReceivedEventArgs args)
+            {
+                HandleWorkerOutput(process, args.Data);
+            };
+            process.ErrorDataReceived += delegate(
+                object sender,
+                DataReceivedEventArgs args)
+            {
+                HandleWorkerError(process, args.Data);
+            };
+            process.Exited += delegate
+            {
+                HandleWorkerExited(process);
+            };
+
+            try
+            {
+                if (!process.Start())
                 {
-                    if (!_uiInvoker.IsDisposed && _uiInvoker.IsHandleCreated)
-                    {
-                        _uiInvoker.BeginInvoke(
-                            new Action<BatteryReading>(ApplyReading),
-                            reading);
-                    }
-                }
-                catch (InvalidOperationException)
-                {
-                    break;
+                    process.Dispose();
+                    ScheduleWorkerRestart(1000, false);
+                    return;
                 }
 
-                _refreshEvent.WaitOne(_nextPollMilliseconds);
+                _batteryWorker = process;
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+            }
+            catch (Exception exception)
+            {
+                process.Dispose();
+                Program.LogWorkerException(exception);
+                ScheduleWorkerRestart(2000, false);
+            }
+        }
+
+        private void HandleWorkerOutput(Process process, string line)
+        {
+            if (string.IsNullOrEmpty(line) ||
+                !object.ReferenceEquals(_batteryWorker, process))
+            {
+                return;
+            }
+
+            if (line.StartsWith("READING|", StringComparison.Ordinal))
+            {
+                Interlocked.Exchange(
+                    ref _workerQueryStartedUtcTicks,
+                    DateTime.UtcNow.Ticks);
+                _workerQueryInFlight = true;
+                return;
+            }
+
+            if (line.StartsWith("WAIT|", StringComparison.Ordinal))
+            {
+                _workerQueryInFlight = false;
+                return;
+            }
+
+            if (line.StartsWith("FATAL|", StringComparison.Ordinal))
+            {
+                _workerQueryInFlight = false;
+                return;
+            }
+
+            if (!line.StartsWith("DATA|", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _workerQueryInFlight = false;
+            BatteryReading reading = ParseWorkerReading(line);
+            if (reading == null)
+            {
+                return;
+            }
+
+            try
+            {
+                _uiInvoker.BeginInvoke(
+                    new Action<BatteryReading>(ApplyReading),
+                    reading);
+            }
+            catch (InvalidOperationException)
+            {
+                // The tray application is shutting down.
+            }
+        }
+
+        private void HandleWorkerError(Process process, string line)
+        {
+            if (string.IsNullOrWhiteSpace(line) ||
+                !object.ReferenceEquals(_batteryWorker, process))
+            {
+                return;
+            }
+
+            Program.LogWorkerException(
+                new InvalidOperationException(line));
+        }
+
+        private void HandleWorkerExited(Process process)
+        {
+            if (!object.ReferenceEquals(_batteryWorker, process))
+            {
+                return;
+            }
+
+            _batteryWorker = null;
+            _workerQueryInFlight = false;
+            process.Dispose();
+
+            if (!_stopping && !_workerRestartScheduled)
+            {
+                ScheduleWorkerRestart(500, false);
+            }
+        }
+
+        private static BatteryReading ParseWorkerReading(string line)
+        {
+            string[] parts = line.Split(new[] { '|' }, 7);
+            if (parts.Length != 7)
+            {
+                return null;
+            }
+
+            int statusValue;
+            int rawValue;
+            bool charging;
+            long ticks;
+            if (!int.TryParse(
+                    parts[1],
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out statusValue) ||
+                !int.TryParse(
+                    parts[3],
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out rawValue) ||
+                !bool.TryParse(
+                    parts[4] == "1" ? "true" : "false",
+                    out charging) ||
+                !long.TryParse(
+                    parts[5],
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out ticks))
+            {
+                return null;
+            }
+
+            int? percentage = null;
+            if (!string.IsNullOrEmpty(parts[2]))
+            {
+                int parsedPercentage;
+                if (!int.TryParse(
+                        parts[2],
+                        System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out parsedPercentage))
+                {
+                    return null;
+                }
+
+                percentage = parsedPercentage;
+            }
+
+            string message;
+            try
+            {
+                message = Encoding.UTF8.GetString(
+                    Convert.FromBase64String(parts[6]));
+            }
+            catch (FormatException)
+            {
+                message = "kunde inte läsas";
+            }
+
+            return BatteryReading.Create(
+                (BatteryStatus)statusValue,
+                percentage,
+                rawValue,
+                charging,
+                message,
+                new DateTime(ticks, DateTimeKind.Local));
+        }
+
+        private void ScheduleWorkerRestart(
+            int delayMilliseconds,
+            bool notify)
+        {
+            if (_stopping || _workerRestartScheduled)
+            {
+                return;
+            }
+
+            _workerRestartScheduled = true;
+            StopBatteryWorker();
+            if (notify)
+            {
+                ShowBalloon(
+                    "Startar om musanslutningen...",
+                    ToolTipIcon.Info);
+            }
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                if (delayMilliseconds > 0)
+                {
+                    Thread.Sleep(delayMilliseconds);
+                }
+
+                if (_stopping)
+                {
+                    return;
+                }
+
+                try
+                {
+                    _uiInvoker.BeginInvoke(new Action(delegate
+                    {
+                        _workerRestartScheduled = false;
+                        StartBatteryWorker();
+                    }));
+                }
+                catch
+                {
+                    // The tray application is shutting down.
+                }
+            });
+        }
+
+        private void StopBatteryWorker()
+        {
+            Process process = _batteryWorker;
+            _batteryWorker = null;
+            _workerQueryInFlight = false;
+            if (process == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit(1000);
+                }
+            }
+            catch
+            {
+                // The process may already have exited.
+            }
+            finally
+            {
+                process.Dispose();
             }
         }
 
@@ -303,12 +622,6 @@ namespace Rat9Battery
                 _lastEstimate));
 
             UpdateSmartAlerts(reading, _lastEstimate);
-            _nextPollMilliseconds =
-                reading.IsCharging ||
-                (reading.HasPercentage &&
-                 reading.Percentage.Value <= 15)
-                    ? 5000
-                    : 12000;
         }
 
         private static string BuildTooltip(
@@ -721,7 +1034,9 @@ namespace Rat9Battery
             }
 
             _stopping = true;
-            _refreshEvent.Set();
+            _workerWatchdog.Stop();
+            _workerWatchdog.Dispose();
+            StopBatteryWorker();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
 
@@ -741,7 +1056,6 @@ namespace Rat9Battery
                 _details.Dispose();
             }
             _menu.Dispose();
-            _refreshEvent.Dispose();
             base.ExitThread();
         }
     }

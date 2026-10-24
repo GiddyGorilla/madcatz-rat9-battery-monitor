@@ -102,7 +102,8 @@ namespace Rat9Battery
             int? percentage,
             int rawValue,
             bool isCharging,
-            string message)
+            string message,
+            DateTime? measuredAt = null)
         {
             return new BatteryReading
             {
@@ -111,7 +112,7 @@ namespace Rat9Battery
                 RawValue = rawValue,
                 IsCharging = isCharging,
                 Message = message,
-                MeasuredAt = DateTime.Now
+                MeasuredAt = measuredAt ?? DateTime.Now
             };
         }
 

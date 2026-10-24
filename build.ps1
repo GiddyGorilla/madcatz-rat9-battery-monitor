@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.0.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,6 +70,7 @@ if (Test-Path -LiteralPath $icon) {
 
 & $csc @commonArguments @applicationArguments `
     "$source\AssemblyInfo.cs" `
+    "$source\BatteryWorkerHost.cs" `
     "$source\Rat9BatteryCore.cs" `
     "$source\Rat9BatteryTray.cs"
 if ($LASTEXITCODE -ne 0) {

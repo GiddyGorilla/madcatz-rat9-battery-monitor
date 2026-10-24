@@ -36,6 +36,7 @@ This project keeps the useful part of that driver and adds:
 - A 24-hour battery history chart.
 - Measured long-term runtime and capacity estimates.
 - Alerts at 20%, 10%, and 5%, when the battery is full, or if the mouse disconnects.
+- Automatic recovery if the aging vendor driver stalls during a battery swap.
 - A detail popup that closes when you click elsewhere.
 - Optional pinning for users who prefer a permanent desktop widget.
 
@@ -116,7 +117,7 @@ Outputs are written to `dist/`:
 
 - `RAT9BatteryTray.exe` — tray application.
 - `RAT9BatteryProbe.exe` — console diagnostic.
-- `MadCatz-RAT9-Battery-Monitor-v1.0.0-win.zip` — release bundle.
+- `MadCatz-RAT9-Battery-Monitor-v1.0.1-win.zip` — release bundle.
 - `SHA256SUMS.txt` — checksums.
 
 The GitHub Actions workflow builds the project on every push and pull request.

@@ -28,6 +28,18 @@ The vendor API returns an integer:
 | `201` | Battery measurement unavailable |
 | `< 0` | Read error |
 
+## Battery-swap recovery
+
+The original SmartTechnology HID call can block while the R.A.T. 9 battery is
+being removed. When that happens from the tray process, the stale handle can
+also prevent the receiver from returning to a normal input state.
+
+The monitor therefore runs vendor access in a separate worker process. The tray
+waits at most eight seconds for one response. If the worker is still blocked,
+the tray terminates it, which releases every HID handle owned by that process,
+and starts a clean worker. A manual **Reconnect mouse** action performs the same
+recovery immediately.
+
 ## Time estimate
 
 The first estimate is based on the documented maximum of about 9 hours of

@@ -35,6 +35,17 @@ The original SmartTechnology control uses value `201` while the mouse is
 docked or asleep. Move the mouse to wake it; the monitor will retry
 automatically.
 
+## Mouse movement works poorly after changing the battery
+
+R.A.T. 9's wireless receiver can keep a stale HID state after a hot battery
+swap. Version 1.0.1 isolates battery-driver calls in a worker process. If a
+read blocks for more than eight seconds, the worker is terminated and restarted,
+which releases the stale driver handle automatically.
+
+If the pointer is still unreliable, right-click the tray icon and choose
+**Reconnect mouse**. As a final fallback, switch the mouse off, reseat the
+battery, and switch it back on.
+
 ## Clear the history
 
 Exit the application, then delete:
