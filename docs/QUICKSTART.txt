@@ -21,12 +21,19 @@ Right-click the tray icon and choose "Batteribyte: pausa läsaren".
 After the new battery is fitted and the mouse is switched on, choose the same
 menu item again. The app then waits ten seconds before resuming battery reads.
 
+NO-REBOOT RECOVERY (OPTIONAL, ONE-TIME UAC)
+Run Install-RAT9-Recovery.cmd once and approve the administrator prompt.
+After installation, the tray app can reset a stuck Mad Catz receiver and filter
+driver without restarting Windows. Manual action:
+"Återställ musanslutningen (admin)"
+
 RIGHT-CLICK MENU
 
 - Open battery details
 - Refresh now
 - Reconnect mouse
 - Battery swap mode
+- Install/reset administrator recovery
 - Pin the detail panel to the desktop
 - Start with Windows
 - Exit

@@ -146,6 +146,7 @@ namespace Rat9Battery
         private const string RunValueName = "MadCatzRat9BatteryTray";
         private const string SettingsKey =
             @"Software\MadCatzRat9BatteryTray";
+        private const string RecoveryTaskName = "MadCatzRat9Recovery";
 
         private readonly BatteryHistoryStore _historyStore;
         private readonly BatteryTimeEstimator _timeEstimator;
@@ -159,6 +160,7 @@ namespace Rat9Battery
         private readonly ToolStripMenuItem _showDetailsItem;
         private readonly ToolStripMenuItem _pinItem;
         private readonly ToolStripMenuItem _swapModeItem;
+        private readonly ToolStripMenuItem _recoveryItem;
         private readonly ToolStripMenuItem _startupItem;
         private readonly HashSet<int> _alertedThresholds =
             new HashSet<int>();
@@ -173,6 +175,7 @@ namespace Rat9Battery
         private bool _workerRestartScheduled;
         private int _workerRestartGeneration;
         private bool _batterySwapMode;
+        private bool _recoveryTaskStarted;
         private bool _stopping;
         private bool _fullChargeNotified;
 
@@ -213,6 +216,13 @@ namespace Rat9Battery
                 null,
                 delegate { ToggleBatterySwapMode(); });
 
+            _recoveryItem = new ToolStripMenuItem(
+                IsRecoveryTaskInstalled()
+                    ? "Återställ musanslutningen (admin)"
+                    : "Installera snabb musåterställning",
+                null,
+                delegate { HandleRecoveryAction(); });
+
             _pinItem = new ToolStripMenuItem(
                 "Fäst detaljpanelen på skrivbordet",
                 null,
@@ -235,6 +245,7 @@ namespace Rat9Battery
             _menu.Items.Add(refreshItem);
             _menu.Items.Add(reconnectItem);
             _menu.Items.Add(_swapModeItem);
+            _menu.Items.Add(_recoveryItem);
             _menu.Items.Add(_pinItem);
             _menu.Items.Add(_startupItem);
             _menu.Items.Add(new ToolStripSeparator());
@@ -287,6 +298,29 @@ namespace Rat9Battery
             }
 
             _workerQueryInFlight = false;
+            if (!_recoveryTaskStarted &&
+                IsRecoveryTaskInstalled())
+            {
+                _recoveryTaskStarted = true;
+                ApplyReading(BatteryReading.Create(
+                    BatteryStatus.Unknown,
+                    null,
+                    -1,
+                    false,
+                    "startar om musanslutningen"));
+                ShowBalloon(
+                    "Muslänken fastnade. Startar om Mad Catz-enheten " +
+                    "utan att starta om datorn.",
+                    ToolTipIcon.Warning);
+                ScheduleWorkerRestart(30000, false);
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    Thread.Sleep(1000);
+                    RunRecoveryTask();
+                });
+                return;
+            }
+
             ApplyReading(BatteryReading.Create(
                 BatteryStatus.Unknown,
                 null,
@@ -650,6 +684,106 @@ namespace Rat9Battery
             _swapModeItem.Text = _batterySwapMode
                 ? "Batteribyte: återanslut efter bytet"
                 : "Batteribyte: pausa läsaren";
+        }
+
+        private void HandleRecoveryAction()
+        {
+            if (IsRecoveryTaskInstalled())
+            {
+                if (RunRecoveryTask())
+                {
+                    ShowBalloon(
+                        "Återställer Mad Catz-enheten. Appen startas om " +
+                        "automatiskt.",
+                        ToolTipIcon.Info);
+                }
+
+                return;
+            }
+
+            string toolPath = Path.Combine(
+                Application.StartupPath,
+                "RAT9RecoveryTool.exe");
+            if (!File.Exists(toolPath))
+            {
+                MessageBox.Show(
+                    "RAT9RecoveryTool.exe saknas bredvid batteriappen.",
+                    "R.A.T. 9",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = toolPath,
+                    Arguments = "--install",
+                    UseShellExecute = true,
+                    Verb = "runas"
+                });
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                ShowBalloon(
+                    "Installationen avbröts.",
+                    ToolTipIcon.Info);
+            }
+        }
+
+        private static bool RunRecoveryTask()
+        {
+            try
+            {
+                using (Process process = Process.Start(
+                    new ProcessStartInfo
+                    {
+                        FileName = "schtasks.exe",
+                        Arguments = "/Run /TN \"" +
+                            RecoveryTaskName + "\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    }))
+                {
+                    process.WaitForExit(5000);
+                    return process.HasExited &&
+                        process.ExitCode == 0;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsRecoveryTaskInstalled()
+        {
+            try
+            {
+                using (Process process = Process.Start(
+                    new ProcessStartInfo
+                    {
+                        FileName = "schtasks.exe",
+                        Arguments = "/Query /TN \"" +
+                            RecoveryTaskName + "\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    }))
+                {
+                    process.WaitForExit(5000);
+                    return process.HasExited &&
+                        process.ExitCode == 0;
+                }
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void ActivationLoop()

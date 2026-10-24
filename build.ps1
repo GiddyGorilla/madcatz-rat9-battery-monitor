@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.2"
+    [string]$Version = "1.0.3"
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +43,7 @@ New-Item -ItemType Directory -Force -Path $output | Out-Null
 
 $applicationExe = Join-Path $output "RAT9BatteryTray.exe"
 $probeExe = Join-Path $output "RAT9BatteryProbe.exe"
+$recoveryExe = Join-Path $output "RAT9RecoveryTool.exe"
 $archive = Join-Path $output (
     "MadCatz-RAT9-Battery-Monitor-v$Version-win.zip")
 
@@ -86,21 +87,45 @@ if ($LASTEXITCODE -ne 0) {
     throw "Probe build failed with exit code $LASTEXITCODE."
 }
 
+$recoveryArguments = @(
+    "/target:winexe",
+    "/out:$recoveryExe",
+    "/win32manifest:$(Join-Path $source 'admin.manifest')",
+    "/reference:System.Windows.Forms.dll"
+)
+if (Test-Path -LiteralPath $icon) {
+    $recoveryArguments += "/win32icon:$icon"
+}
+
+& $csc @commonArguments @recoveryArguments `
+    "$source\RecoveryAssemblyInfo.cs" `
+    "$source\Rat9RecoveryTool.cs"
+if ($LASTEXITCODE -ne 0) {
+    throw "Recovery tool build failed with exit code $LASTEXITCODE."
+}
+
 Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination $output -Force
 Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination $output -Force
 Copy-Item -LiteralPath (Join-Path $root "docs\QUICKSTART.txt") -Destination $output -Force
+Copy-Item -LiteralPath (Join-Path $root "Install-RAT9-Recovery.cmd") -Destination $output -Force
 
 $releaseFiles = @(
     $applicationExe,
     $probeExe,
+    $recoveryExe,
     (Join-Path $output "README.md"),
     (Join-Path $output "LICENSE"),
-    (Join-Path $output "QUICKSTART.txt")
+    (Join-Path $output "QUICKSTART.txt"),
+    (Join-Path $output "Install-RAT9-Recovery.cmd")
 )
 
 Compress-Archive -LiteralPath $releaseFiles -DestinationPath $archive -Force
 
-$hashLines = foreach ($file in @($applicationExe, $probeExe, $archive)) {
+$hashLines = foreach ($file in @(
+    $applicationExe,
+    $probeExe,
+    $recoveryExe,
+    $archive)) {
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $file
     "$($hash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($file))"
 }
@@ -109,4 +134,5 @@ $hashLines | Set-Content -LiteralPath (
 
 Write-Host "Built $applicationExe"
 Write-Host "Built $probeExe"
+Write-Host "Built $recoveryExe"
 Write-Host "Created $archive"

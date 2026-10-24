@@ -38,6 +38,7 @@ This project keeps the useful part of that driver and adds:
 - Alerts at 20%, 10%, and 5%, when the battery is full, or if the mouse disconnects.
 - Automatic recovery if the aging vendor driver stalls during a battery swap.
 - A battery-swap mode that releases the HID handle before replacing the cell.
+- An optional no-reboot recovery helper for a receiver stuck after a swap.
 - A detail popup that closes when you click elsewhere.
 - Optional pinning for users who prefer a permanent desktop widget.
 
@@ -64,6 +65,13 @@ telemetry, cloud service, or bundled proprietary Mad Catz code.
 Windows may initially place the icon under the notification-area chevron.
 Enable it under **Settings → Personalization → Taskbar → Other system tray
 icons**, or drag it onto the taskbar.
+
+### Optional: avoid a Windows reboot after a stuck swap
+
+Run `Install-RAT9-Recovery.cmd` once and approve the administrator prompt. The
+release then includes a narrowly scoped recovery task that resets only the
+R.A.T. 9 receiver and Mad Catz filter driver. After installation, the tray app
+can recover from a stalled battery read without restarting Windows.
 
 Right-click the tray icon to:
 
@@ -118,7 +126,7 @@ Outputs are written to `dist/`:
 
 - `RAT9BatteryTray.exe` — tray application.
 - `RAT9BatteryProbe.exe` — console diagnostic.
-- `MadCatz-RAT9-Battery-Monitor-v1.0.2-win.zip` — release bundle.
+- `MadCatz-RAT9-Battery-Monitor-v1.0.3-win.zip` — release bundle.
 - `SHA256SUMS.txt` — checksums.
 
 The GitHub Actions workflow builds the project on every push and pull request.

@@ -43,5 +43,6 @@ jobs:
           files: |
             dist/RAT9BatteryTray.exe
             dist/RAT9BatteryProbe.exe
+            dist/RAT9RecoveryTool.exe
             dist/MadCatz-RAT9-Battery-Monitor-v*-win.zip
             dist/SHA256SUMS.txt

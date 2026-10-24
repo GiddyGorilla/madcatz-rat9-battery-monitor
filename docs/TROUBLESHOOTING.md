@@ -52,6 +52,18 @@ If the pointer is still unreliable, right-click the tray icon and choose
 battery, and switch it back on. If Windows already holds a stale receiver
 connection, unplug the small receiver for five seconds and reconnect it.
 
+### No-reboot administrator recovery
+
+For a receiver that stays stuck even after reconnecting it:
+
+1. Run `Install-RAT9-Recovery.cmd` once from the application folder.
+2. Approve the administrator prompt.
+3. After that, use **Reset mouse connection (admin)** from the tray menu.
+
+The helper resets only the `VID_0738&PID_1709` receiver and the
+`_hid_0738_1709` filter driver, then restarts SmartTechnology and the tray app.
+It does not restart Windows or terminate games.
+
 ## Clear the history
 
 Exit the application, then delete:

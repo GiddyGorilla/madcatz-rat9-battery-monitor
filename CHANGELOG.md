@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## 1.0.3 — 2026-10-24
+
+### Added
+
+- Optional administrator-assisted recovery tool for a receiver that remains
+  stuck after a battery swap.
+- One-time installer for a narrowly scoped on-demand scheduled task.
+- Automatic driver/device reset when an installed recovery task is available.
+- Manual **Reset mouse connection (admin)** tray action.
+
+### Changed
+
+- Recovery resets only hardware matching `VID_0738&PID_1709`.
+- The installed task receives no arguments and starts no network access.
+
 ## 1.0.2 — 2026-10-24
 
 ### Fixed
