@@ -37,8 +37,12 @@ also prevent the receiver from returning to a normal input state.
 The monitor therefore runs vendor access in a separate worker process. The tray
 waits at most eight seconds for one response. If the worker is still blocked,
 the tray terminates it, which releases every HID handle owned by that process,
-and starts a clean worker. A manual **Reconnect mouse** action performs the same
-recovery immediately.
+and waits 15 seconds before starting a clean worker. A manual **Reconnect mouse**
+action performs the same recovery immediately.
+
+The tray menu also offers a battery-swap mode. It stops the worker before the
+cell is removed, so the app holds no vendor HID handle during the physical
+swap. Finishing the mode delays the next read by ten seconds.
 
 ## Time estimate
 

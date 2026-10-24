@@ -39,12 +39,18 @@ automatically.
 
 R.A.T. 9's wireless receiver can keep a stale HID state after a hot battery
 swap. Version 1.0.1 isolates battery-driver calls in a worker process. If a
-read blocks for more than eight seconds, the worker is terminated and restarted,
-which releases the stale driver handle automatically.
+read blocks for more than eight seconds, the worker is terminated, its HID
+handle is released, and version 1.0.2 waits 15 seconds before opening a fresh
+reader.
+
+For scheduled battery changes, right-click the tray icon and choose
+**Battery swap: pause reader** before opening the mouse. Use the same menu entry
+to finish. The monitor waits ten seconds before reading the new battery.
 
 If the pointer is still unreliable, right-click the tray icon and choose
 **Reconnect mouse**. As a final fallback, switch the mouse off, reseat the
-battery, and switch it back on.
+battery, and switch it back on. If Windows already holds a stale receiver
+connection, unplug the small receiver for five seconds and reconnect it.
 
 ## Clear the history
 

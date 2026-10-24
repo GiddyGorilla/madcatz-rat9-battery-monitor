@@ -158,6 +158,7 @@ namespace Rat9Battery
         private readonly EventWaitHandle _activateEvent;
         private readonly ToolStripMenuItem _showDetailsItem;
         private readonly ToolStripMenuItem _pinItem;
+        private readonly ToolStripMenuItem _swapModeItem;
         private readonly ToolStripMenuItem _startupItem;
         private readonly HashSet<int> _alertedThresholds =
             new HashSet<int>();
@@ -170,6 +171,8 @@ namespace Rat9Battery
         private volatile bool _workerQueryInFlight;
         private long _workerQueryStartedUtcTicks;
         private bool _workerRestartScheduled;
+        private int _workerRestartGeneration;
+        private bool _batterySwapMode;
         private bool _stopping;
         private bool _fullChargeNotified;
 
@@ -197,7 +200,18 @@ namespace Rat9Battery
             ToolStripMenuItem reconnectItem = new ToolStripMenuItem(
                 "Återanslut musen",
                 null,
-                delegate { ScheduleWorkerRestart(0, true); });
+                delegate
+                {
+                    CancelScheduledWorkerRestart();
+                    _batterySwapMode = false;
+                    UpdateSwapModeItem();
+                    ScheduleWorkerRestart(0, true);
+                });
+
+            _swapModeItem = new ToolStripMenuItem(
+                "Batteribyte: pausa läsaren",
+                null,
+                delegate { ToggleBatterySwapMode(); });
 
             _pinItem = new ToolStripMenuItem(
                 "Fäst detaljpanelen på skrivbordet",
@@ -220,6 +234,7 @@ namespace Rat9Battery
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(refreshItem);
             _menu.Items.Add(reconnectItem);
+            _menu.Items.Add(_swapModeItem);
             _menu.Items.Add(_pinItem);
             _menu.Items.Add(_startupItem);
             _menu.Items.Add(new ToolStripSeparator());
@@ -277,17 +292,18 @@ namespace Rat9Battery
                 null,
                 -1,
                 false,
-                "återansluter musen"));
+                "väntar på musanslutningen"));
             ShowBalloon(
-                "Batteriläsningen fastnade vid batteribytet. " +
-                "Musanslutningen återställs automatiskt.",
+                "Batteriläsningen fastnade. HID-handtaget släpps " +
+                "och musen får 15 sekunder att återansluta.",
                 ToolTipIcon.Warning);
-            ScheduleWorkerRestart(250, false);
+            ScheduleWorkerRestart(15000, false);
         }
 
         private void StartBatteryWorker()
         {
             if (_stopping ||
+                _batterySwapMode ||
                 (_batteryWorker != null && !_batteryWorker.HasExited))
             {
                 return;
@@ -420,7 +436,9 @@ namespace Rat9Battery
             _workerQueryInFlight = false;
             process.Dispose();
 
-            if (!_stopping && !_workerRestartScheduled)
+            if (!_stopping &&
+                !_batterySwapMode &&
+                !_workerRestartScheduled)
             {
                 ScheduleWorkerRestart(500, false);
             }
@@ -500,12 +518,15 @@ namespace Rat9Battery
             int delayMilliseconds,
             bool notify)
         {
-            if (_stopping || _workerRestartScheduled)
+            if (_stopping ||
+                _batterySwapMode ||
+                _workerRestartScheduled)
             {
                 return;
             }
 
             _workerRestartScheduled = true;
+            int generation = ++_workerRestartGeneration;
             StopBatteryWorker();
             if (notify)
             {
@@ -530,6 +551,13 @@ namespace Rat9Battery
                 {
                     _uiInvoker.BeginInvoke(new Action(delegate
                     {
+                        if (generation != _workerRestartGeneration ||
+                            _stopping ||
+                            _batterySwapMode)
+                        {
+                            return;
+                        }
+
                         _workerRestartScheduled = false;
                         StartBatteryWorker();
                     }));
@@ -539,6 +567,12 @@ namespace Rat9Battery
                     // The tray application is shutting down.
                 }
             });
+        }
+
+        private void CancelScheduledWorkerRestart()
+        {
+            _workerRestartGeneration++;
+            _workerRestartScheduled = false;
         }
 
         private void StopBatteryWorker()
@@ -567,6 +601,55 @@ namespace Rat9Battery
             {
                 process.Dispose();
             }
+        }
+
+        private void ToggleBatterySwapMode()
+        {
+            if (_batterySwapMode)
+            {
+                _batterySwapMode = false;
+                UpdateSwapModeItem();
+                ApplyReading(BatteryReading.Create(
+                    BatteryStatus.Unknown,
+                    null,
+                    -1,
+                    false,
+                    "väntar på batteriläsaren"));
+                ShowBalloon(
+                    "Batteribyte slutfört. Väntar 10 sekunder " +
+                    "innan musanslutningen läses igen.",
+                    ToolTipIcon.Info);
+                ScheduleWorkerRestart(10000, false);
+                return;
+            }
+
+            CancelScheduledWorkerRestart();
+            _batterySwapMode = true;
+            UpdateSwapModeItem();
+            StopBatteryWorker();
+            ApplyReading(BatteryReading.Create(
+                BatteryStatus.Unknown,
+                null,
+                -1,
+                false,
+                "läsaren är pausad inför batteribyte"));
+            ShowBalloon(
+                "Batteribyte-läget är aktivt. Byt batteri och välj " +
+                "samma menyval igen när musen är på.",
+                ToolTipIcon.Info);
+        }
+
+        private void UpdateSwapModeItem()
+        {
+            if (_swapModeItem == null)
+            {
+                return;
+            }
+
+            _swapModeItem.Checked = _batterySwapMode;
+            _swapModeItem.Text = _batterySwapMode
+                ? "Batteribyte: återanslut efter bytet"
+                : "Batteribyte: pausa läsaren";
         }
 
         private void ActivationLoop()

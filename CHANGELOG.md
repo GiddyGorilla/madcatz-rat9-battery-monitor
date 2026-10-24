@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## 1.0.2 — 2026-10-24
+
+### Fixed
+
+- Delay automatic worker recovery for 15 seconds after a blocked swap read,
+  giving the wireless receiver time to reinitialize before the HID handle is
+  opened again.
+- Added an explicit **Battery swap: pause reader** tray action. It releases the
+  HID handle before the battery is removed and waits ten seconds before reading
+  again after the swap.
+- Cancel stale scheduled restarts when the user starts a battery swap or
+  manually reconnects.
+
 ## 1.0.1 — 2026-10-24
 
 ### Fixed
