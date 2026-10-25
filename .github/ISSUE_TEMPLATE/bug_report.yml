@@ -31,5 +31,5 @@ body:
     id: diagnostic
     attributes:
       label: Probe output
-      description: Paste the output of RAT9BatteryProbe.exe after redacting personal paths.
+      description: Paste the output of RAT9BatteryProbe.exe or V102BatteryProbe.exe after redacting personal paths.
       render: text

@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented here.
 
+## 1.1.0 — 2026-10-25
+
+### Added
+
+- EWEADN V102 Pro battery, charging state, firmware, serial, mode, and MAC
+  reporting over its native HID protocol.
+- Combined tray state that displays the lowest connected device battery.
+- V102 24-hour history and learned remaining-time estimates.
+- V102 lighting profiles using the effects, palette colors, brightness, speed,
+  and logo modes exposed by the official protocol.
+- Local named profiles with optional executable paths.
+- Automatic game-profile activation with foreground-game priority, base-profile
+  restoration, and reconnect retry.
+- Standalone V102 hardware diagnostic.
+- Deterministic protocol, estimator, profile, and game-priority tests.
+
+### Changed
+
+- Raised the release number to 1.1.0 and expanded the project documentation
+  for both supported devices.
+- Battery detail panel now shows R.A.T. 9 and V102 Pro together.
+
+### Notes
+
+- V102's official protocol does not expose an addressable per-key RGB matrix.
+  The app implements the verified global lighting controls instead.
+- V102 runtime is never seeded with a fabricated full-charge duration.
+
 ## 1.0.3 — 2026-10-24
 
 ### Added

@@ -1,6 +1,13 @@
 # V102 Pro Game RGB Integration
 
-Status: Design approved in conversation on 2026-10-25. Awaiting spec review.
+Status: Implemented on 2026-10-25 after verification against the physical V102
+Pro and its current E HUB protocol module.
+
+Hardware-verification amendment: E HUB's `sdk-kbd-dakai` module controls global
+V102 lighting zones and effects. It does not expose an addressable per-key LED
+matrix for this model. The implementation therefore provides verified global
+lighting profiles and game switching instead of inventing unverified per-key
+commands.
 
 ## Summary
 
@@ -11,7 +18,7 @@ The keyboard integration provides:
 
 - Live battery percentage and charging state over the 2.4 GHz receiver.
 - A learned runtime estimate based on measured discharge.
-- A local per-key RGB editor.
+- A local lighting editor for the global effects and colors exposed by V102.
 - Saved keyboard profiles.
 - Automatic profile activation when configured game processes start.
 - Automatic restoration of a base profile when games exit.
@@ -33,8 +40,7 @@ Target keyboard:
   - Receiver serial family: `DONGLE_250530V206C`
 - E HUB protocol provider: `dakai-hid`
 - V102 Logo model ID: `257`
-- Matrix data length: 20 bytes.
-- Matrix key count: 19.
+- The 20-byte matrix structures in E HUB are key-remapping data, not LED data.
 - Logo light: supported.
 
 Bluetooth is not supported by EWEADN for keyboard configuration and RGB.
@@ -47,8 +53,9 @@ The R.A.T. 9 integration remains independent and continues to use only
 ## Goals
 
 1. Show battery and charging state for both devices in one application.
-2. Let the user assign an independent RGB color to every V102 key.
-3. Save RGB configurations as named local profiles.
+2. Let the user choose every lighting effect, palette color, brightness, and
+   speed exposed by the official V102 protocol.
+3. Save lighting configurations as named local profiles.
 4. Bind one or more executable paths to each game profile.
 5. Apply a game's profile when its process starts.
 6. Restore the base profile when no configured game remains active.
@@ -58,6 +65,8 @@ The R.A.T. 9 integration remains independent and continues to use only
 
 The first release does not include:
 
+- Per-key addressable RGB, because the official V102 HID protocol does not
+  expose it for this model.
 - Per-frame animated RGB authored inside this application.
 - Macros, key remapping, or keyboard firmware updates.
 - Cloud synchronization or an EWEADN account.
@@ -105,23 +114,22 @@ The V102 tab shows:
 No fabricated runtime is displayed before calibration. Until enough discharge
 data exists, the app shows `samlar mätdata`.
 
-### RGB editor
+### Lighting editor
 
-The RGB tab contains a 99-key visual representation of the V102 Pro. Clicking
-or dragging across keys selects them, and the selector applies a color to all
-selected keys. The logo light is selectable as a separate element.
+The lighting window exposes only capabilities present in the verified Dakai
+HID protocol:
 
-Controls:
+- Animated effects `0–7`.
+- Static palette colors `16–24`.
+- Brightness level `1–5`.
+- Speed level `0–4`.
+- Logo synchronized, solid red/green/blue/yellow/cyan/purple/white, or off.
+- Lighting on/off.
+- Separate breath and flowing-color palette selectors where supported.
 
-- Color picker with hexadecimal input.
-- Brightness from 0 to 100 percent.
-- Select all, clear selection, copy, paste, and undo.
-- Reset to black.
-- Save, duplicate, rename, and delete profile.
-- Apply changes immediately to the keyboard.
+The user can read the current keyboard settings, create, rename, delete, save,
+and apply local profiles. The selected base profile is marked explicitly.
 
-The editor maintains a local draft. Moving away does not silently discard
-unsaved changes; the app asks whether to save, apply once, or discard.
 
 ### Game profiles
 
@@ -129,8 +137,9 @@ Each profile contains:
 
 - Profile name.
 - One or more selected executable paths.
-- Per-key RGB colors.
-- Logo color.
+- Global lighting effect and palette color.
+- Lighting speed.
+- Logo-light mode.
 - Brightness.
 
 The user selects a game executable through a standard Windows file picker.
@@ -142,7 +151,7 @@ Behavior:
 2. A configured game becomes active when its executable process is running.
 3. If several configured games run simultaneously, the game owning the
    foreground window takes priority.
-4. The profile is sent after a one-second settle delay.
+4. The profile is sent on the next two-second scan.
 5. If the keyboard is disconnected, the app remembers the pending profile and
    applies it after reconnection while the game remains active.
 6. When the last configured game exits, the selected base profile is restored.
@@ -174,10 +183,10 @@ BatteryReading
 IDeviceBatterySource
     ReadBattery()
 
-IRgbDevice
-    SupportsRgb
-    ReadLayout()
-    ApplyLayout()
+ILightingDevice
+    SupportsLighting
+    ReadKeyboardConfig()
+    ApplyKeyboardConfig()
 ```
 
 Adapters:
@@ -202,38 +211,46 @@ Protocol operations are limited to:
 - Device information and model detection.
 - Battery status.
 - Charging status.
-- Reading current RGB.
-- Applying per-key RGB.
-- Applying logo RGB.
-- Applying brightness.
+- Reading current keyboard lighting.
+- Applying the selected effect and palette color.
+- Applying lighting brightness and speed.
+- Applying the logo-light mode.
 
 ### V102 battery protocol
 
-The official E HUB V102 adapter obtains battery state with command `0x87`
-(`135`). The response includes battery level and a separate charge-status
-value. The adapter validates:
+The physical V102 uses the Dakai `sdk-kbd-dakai` protocol, not the separate
+`beiying` command set. Device information and battery state come from a
+32-byte HID command beginning `55 AA 80`. The verified response begins
+`55 BB 80 20`; byte 4 is the charge-state bit field and byte 5 is the
+percentage. The adapter validates:
 
-- Response command identity.
-- Expected response length.
+- Response marker and command identity.
+- Expected response length and status.
 - Level range of 0 through 100.
-- Device model remains V102 Logo.
+- The identity reports V102 model serial `257`.
 
 A malformed or unexpected response is treated as an unavailable measurement,
 not as 0 percent.
 
-### V102 RGB protocol
+### V102 lighting protocol
 
-The V102 Logo adapter uses the official 20-byte matrix format and the key map
-published by E HUB for keyboard type `v102`.
+Reading settings uses `55 AA 81`. Applying settings uses `55 AA 82 11`,
+followed by the existing keyboard configuration with only lighting fields
+changed. Sleep, idle, operating-system, and Windows-key settings are preserved.
 
-The UI maps 99 logical keys to protocol key IDs. The transport converts the
-logical map to the V102 matrix format and writes it in bounded report chunks.
-The logo light is a separate logical element and is sent together with the
-main lighting update.
+The 2.4 GHz effect field is one of:
 
-Write operations are serialized. Only one RGB transaction may be active at a
-time. A failed transaction does not retry indefinitely; the app reports the
-error and allows the user to retry.
+- `0–7` for animated effects.
+- `16–24` for static palette colors.
+
+The nine effect brightness/speed bytes use `(speed << 4) | brightness` at
+`effect + 1`. Static modes use the brightness nibble in byte 0. Logo modes and
+the two breath/flow palette selectors are stored in their verified
+configuration bytes.
+
+The protocol has no addressable per-key LED matrix for this model. Write
+operations are serialized with battery reads. A failed write remains visibly
+failed and is not retried in an unbounded loop.
 
 ### Runtime estimate
 
@@ -280,7 +297,7 @@ Schema version 1:
 ```json
 {
   "version": 1,
-  "baseProfileId": "default",
+  "baseProfileId": "base",
   "profiles": [
     {
       "id": "game-a",
@@ -288,12 +305,13 @@ Schema version 1:
       "executables": [
         "D:\\Games\\GameA\\GameA.exe"
       ],
-      "keyColors": {
-        "ESC": "#ff0000",
-        "W": "#00ff00"
-      },
-      "logoColor": "#0000ff",
-      "brightness": 70
+      "enabled": true,
+      "effectMode": 16,
+      "brightness": 4,
+      "speed": 3,
+      "logoMode": 9,
+      "breathColor": 2,
+      "waveColor": 5
     }
   ]
 }
@@ -309,8 +327,8 @@ they do not prevent the application from starting.
 
 - If the V102 dongle is missing, the keyboard tab shows disconnected.
 - If another process has exclusive access, the app displays an access error.
-- If RGB programming fails, existing keyboard lighting remains unchanged
-  where the protocol supports transactional updates.
+- If lighting programming fails, the app reports the error and retries only
+  after reconnecting or after a bounded backoff.
 - If a game profile references a missing executable, the profile remains
   stored and the missing path is visibly marked.
 - If the app starts with a configured game already running, it applies the
@@ -335,8 +353,8 @@ Automated checks:
 - Profile JSON round-trip and corruption handling.
 - Process priority selection and base-profile restoration with a fake monitor.
 - Battery response validation and invalid-response handling.
-- RGB logical key map maps every supported key exactly once.
-- RGB report chunking preserves complete transaction boundaries.
+- Device-information and battery responses are validated.
+- Lighting configuration preserves non-lighting fields and round-trips.
 - Runtime estimator rejects charging gaps and implausible rates.
 - Single-instance behavior remains intact.
 
@@ -345,7 +363,7 @@ Physical integration checks:
 - Windows detects `1452:591` through the 2.4 GHz receiver.
 - Battery level matches E HUB's value on the same device.
 - Charging status changes when USB-C is connected.
-- Each key can be assigned distinctly and visibly.
+- Every published animated effect and static palette color can be selected.
 - Logo lighting can be changed independently.
 - A layout survives app restart and reconnects correctly.
 - Launching a configured executable applies its profile within three seconds.
@@ -357,7 +375,7 @@ Physical integration checks:
 
 1. Protocol and battery support.
 2. Unified device UI and battery history.
-3. Per-key RGB read/write and local profiles.
+3. Verified global lighting profiles and local persistence.
 4. Game process profiles and automatic restoration.
 
 Each phase must work on the physical V102 before the next phase is considered

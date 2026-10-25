@@ -64,12 +64,44 @@ The helper resets only the `VID_0738&PID_1709` receiver and the
 `_hid_0738_1709` filter driver, then restarts SmartTechnology and the tray app.
 It does not restart Windows or terminate games.
 
+## V102 Pro is not detected
+
+Check that the 2.4 GHz dongle is connected and run:
+
+```powershell
+.\V102BatteryProbe.exe
+```
+
+Windows should expose the vendor HID identity `05AC:024F` with usage page
+`0x00C0`, usage `0x0001`, and report ID `0`. If the probe reports that the
+device was not found, unplug the dongle for five seconds and reconnect it.
+
+The Bluetooth channel is not used for configuration or lighting. Use the
+2.4 GHz dongle or USB-C for V102 lighting writes.
+
+## V102 lighting does not change
+
+Close E HUB while the tray application controls the keyboard. Then:
+
+1. Right-click the tray icon.
+2. Open **V102 RGB och spelprofiler**.
+3. Select the profile and choose **Läs från tangentbord**.
+4. Change one setting and choose **Spara och applicera**.
+
+The official V102 protocol exposes global lighting zones and predefined
+palette colors. Independent colors for every key are not available from this
+model's protocol.
+
+If a configured game profile does not activate, confirm that the stored path
+points to the exact `.exe` file, not only the launcher or a shortcut.
+
 ## Clear the history
 
 Exit the application, then delete:
 
 ```text
 %LOCALAPPDATA%\MadCatzRat9BatteryTray\history-v1.txt
+%LOCALAPPDATA%\MadCatzRat9BatteryTray\v102-history-v1.txt
 ```
 
 The next estimate will start from the 9-hour specification again.

@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using Rat9Battery.V102;
 
 namespace Rat9Battery
 {
@@ -150,25 +151,36 @@ namespace Rat9Battery
 
         private readonly BatteryHistoryStore _historyStore;
         private readonly BatteryTimeEstimator _timeEstimator;
+        private readonly V102BatteryHistoryStore _v102HistoryStore;
+        private readonly V102BatterySource _v102Source;
+        private readonly KeyboardProfileStore _profileStore;
         private readonly NotifyIcon _notifyIcon;
         private readonly ContextMenuStrip _menu;
         private readonly Control _uiInvoker;
         private BatteryDetailForm _details;
+        private V102LightingForm _lightingForm;
         private readonly Thread _activationThread;
         private readonly System.Windows.Forms.Timer _workerWatchdog;
+        private readonly System.Windows.Forms.Timer _v102PollTimer;
+        private readonly System.Windows.Forms.Timer _gameProfileTimer;
         private readonly EventWaitHandle _activateEvent;
         private readonly ToolStripMenuItem _showDetailsItem;
         private readonly ToolStripMenuItem _pinItem;
         private readonly ToolStripMenuItem _swapModeItem;
         private readonly ToolStripMenuItem _recoveryItem;
         private readonly ToolStripMenuItem _startupItem;
+        private readonly ToolStripMenuItem _lightingItem;
         private readonly HashSet<int> _alertedThresholds =
+            new HashSet<int>();
+        private readonly HashSet<int> _v102AlertedThresholds =
             new HashSet<int>();
 
         private Icon _currentIcon;
         private Process _batteryWorker;
         private BatteryReading _lastReading;
         private BatteryTimeEstimate _lastEstimate;
+        private DeviceBatteryReading _lastV102Reading;
+        private V102TimeEstimate _lastV102Estimate;
         private BatteryStatus? _previousStatus;
         private volatile bool _workerQueryInFlight;
         private long _workerQueryStartedUtcTicks;
@@ -178,6 +190,15 @@ namespace Rat9Battery
         private bool _recoveryTaskStarted;
         private bool _stopping;
         private bool _fullChargeNotified;
+        private bool _v102FullChargeNotified;
+        private int _v102PollInFlight;
+        private int _gameProfileScanInFlight;
+        private int _gameProfileApplyInFlight;
+        private V102ProfilesDocument _profilesDocument;
+        private GameProfileMonitor _gameProfileMonitor;
+        private string _lastAppliedGameProfileId;
+        private string _manualProfileOverrideId;
+        private DateTime _gameProfileRetryAfterUtc;
 
         public BatteryTrayContext(EventWaitHandle activateEvent)
         {
@@ -185,6 +206,13 @@ namespace Rat9Battery
             _historyStore = new BatteryHistoryStore();
             _timeEstimator = new BatteryTimeEstimator(
                 _historyStore.GetRecentSamples(TimeSpan.FromDays(14)));
+            _v102HistoryStore = new V102BatteryHistoryStore();
+            _v102Source = new V102BatterySource();
+            _profileStore = new KeyboardProfileStore();
+            _profilesDocument = _profileStore.LoadOrCreate();
+            _gameProfileMonitor = new GameProfileMonitor(
+                _profilesDocument.Profiles,
+                _profilesDocument.BaseProfileId);
 
             _uiInvoker = new Control();
             _uiInvoker.CreateControl();
@@ -229,11 +257,17 @@ namespace Rat9Battery
                 delegate { TogglePinned(); });
             _pinItem.Checked = IsPinned();
 
+            _lightingItem = new ToolStripMenuItem(
+                "V102 RGB och spelprofiler",
+                null,
+                delegate { OpenLightingWindow(); });
+
             _startupItem = new ToolStripMenuItem(
                 "Starta med Windows",
                 null,
                 delegate { ToggleStartup(); });
             _startupItem.Checked = IsStartupEnabled();
+            EnsureStartupPathCurrent();
 
             ToolStripMenuItem exitItem = new ToolStripMenuItem(
                 "Avsluta",
@@ -246,6 +280,7 @@ namespace Rat9Battery
             _menu.Items.Add(reconnectItem);
             _menu.Items.Add(_swapModeItem);
             _menu.Items.Add(_recoveryItem);
+            _menu.Items.Add(_lightingItem);
             _menu.Items.Add(_pinItem);
             _menu.Items.Add(_startupItem);
             _menu.Items.Add(new ToolStripSeparator());
@@ -275,6 +310,24 @@ namespace Rat9Battery
             _workerWatchdog.Tick += WorkerWatchdogTick;
             _workerWatchdog.Start();
             StartBatteryWorker();
+
+            _v102PollTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 10000
+            };
+            _v102PollTimer.Tick += V102PollTimerTick;
+            _v102PollTimer.Start();
+            QueueV102Poll();
+
+            _gameProfileTimer = new System.Windows.Forms.Timer
+            {
+                Interval = 2000
+            };
+            _gameProfileTimer.Tick += delegate
+            {
+                QueueGameProfileScan();
+            };
+            _gameProfileTimer.Start();
 
             _activationThread = new Thread(ActivationLoop);
             _activationThread.IsBackground = true;
@@ -332,6 +385,428 @@ namespace Rat9Battery
                 "och musen får 15 sekunder att återansluta.",
                 ToolTipIcon.Warning);
             ScheduleWorkerRestart(15000, false);
+        }
+
+        private void V102PollTimerTick(
+            object sender,
+            EventArgs args)
+        {
+            QueueV102Poll();
+        }
+
+        private void QueueV102Poll()
+        {
+            if (_stopping ||
+                Interlocked.CompareExchange(
+                    ref _v102PollInFlight,
+                    1,
+                    0) != 0)
+            {
+                return;
+            }
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                DeviceBatteryReading reading = null;
+                try
+                {
+                    reading = _v102Source.ReadBattery();
+                }
+                finally
+                {
+                    Interlocked.Exchange(
+                        ref _v102PollInFlight,
+                        0);
+                }
+
+                if (_stopping || reading == null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    _uiInvoker.BeginInvoke(
+                        new Action<DeviceBatteryReading>(
+                            ApplyV102Reading),
+                        reading);
+                }
+                catch
+                {
+                    // The tray is shutting down.
+                }
+            });
+        }
+
+        private void ApplyV102Reading(
+            DeviceBatteryReading reading)
+        {
+            if (_stopping || reading == null)
+            {
+                return;
+            }
+
+            bool wasConnected =
+                _lastV102Reading != null &&
+                _lastV102Reading.ConnectionState ==
+                    DeviceConnectionState.Connected;
+            bool wasDisconnected =
+                _lastV102Reading != null &&
+                _lastV102Reading.ConnectionState ==
+                    DeviceConnectionState.Disconnected;
+            _lastV102Reading = reading;
+            if (reading.ConnectionState ==
+                    DeviceConnectionState.Connected &&
+                !wasConnected)
+            {
+                _lastAppliedGameProfileId = null;
+                if (wasDisconnected)
+                {
+                    ShowBalloon(
+                        "V102 Pro är återansluten.",
+                        ToolTipIcon.Info);
+                }
+            }
+            else if (wasConnected &&
+                reading.ConnectionState ==
+                    DeviceConnectionState.Disconnected)
+            {
+                ShowBalloon(
+                    "V102 Pro tappade förbindelsen. Kontrollera " +
+                    "2,4 GHz-dongeln.",
+                    ToolTipIcon.Warning);
+            }
+            _v102HistoryStore.Record(reading);
+            _lastV102Estimate = V102TimeEstimator.Calculate(
+                reading,
+                _v102HistoryStore.GetRecentSamples(
+                    TimeSpan.FromDays(14)));
+
+            if (_details != null)
+            {
+                _details.UpdateV102Reading(
+                    reading,
+                    _lastV102Estimate,
+                    _v102HistoryStore.GetRecentSamples(
+                        TimeSpan.FromHours(24)));
+            }
+
+            RefreshTrayPresentation();
+            UpdateV102Alerts(reading);
+        }
+
+        private void UpdateV102Alerts(
+            DeviceBatteryReading reading)
+        {
+            if (reading == null || !reading.HasPercentage)
+            {
+                return;
+            }
+
+            if (reading.IsCharging || reading.IsFull)
+            {
+                _v102AlertedThresholds.Clear();
+            }
+
+            if (reading.IsFull && !_v102FullChargeNotified)
+            {
+                _v102FullChargeNotified = true;
+                ShowBalloon(
+                    "V102 Pro-batteriet är fullt.",
+                    ToolTipIcon.Info);
+            }
+            else if (!reading.IsFull)
+            {
+                _v102FullChargeNotified = false;
+            }
+
+            if (reading.IsCharging)
+            {
+                return;
+            }
+
+            int percentage = reading.Percentage.Value;
+            foreach (int threshold in new[] { 20, 10, 5 })
+            {
+                if (percentage <= threshold &&
+                    _v102AlertedThresholds.Add(threshold))
+                {
+                    ShowBalloon(
+                        "V102 Pro-batteriet är på " +
+                        percentage + "%.",
+                        threshold <= 10
+                            ? ToolTipIcon.Error
+                            : ToolTipIcon.Warning);
+                }
+            }
+        }
+
+        private void QueueGameProfileScan()
+        {
+            if (_stopping ||
+                Interlocked.CompareExchange(
+                    ref _gameProfileScanInFlight,
+                    1,
+                    0) != 0)
+            {
+                return;
+            }
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                IList<GameProcessInfo> processes = null;
+                int? foregroundProcessId = null;
+                try
+                {
+                    processes = RunningProcessSnapshot.Capture();
+                    foregroundProcessId =
+                        RunningProcessSnapshot
+                            .GetForegroundProcessId();
+                }
+                catch
+                {
+                    // A process can exit while its module is enumerated.
+                }
+                finally
+                {
+                    Interlocked.Exchange(
+                        ref _gameProfileScanInFlight,
+                        0);
+                }
+
+                if (_stopping)
+                {
+                    return;
+                }
+
+                try
+                {
+                    _uiInvoker.BeginInvoke(
+                        new Action<
+                            IList<GameProcessInfo>,
+                            int?>(HandleGameSnapshot),
+                        processes,
+                        foregroundProcessId);
+                }
+                catch
+                {
+                    // The tray is shutting down.
+                }
+            });
+        }
+
+        private void HandleGameSnapshot(
+            IList<GameProcessInfo> processes,
+            int? foregroundProcessId)
+        {
+            if (_stopping || _gameProfileMonitor == null)
+            {
+                return;
+            }
+
+            GameProfileDecision decision =
+                _gameProfileMonitor.Evaluate(
+                processes,
+                foregroundProcessId);
+            if (!string.Equals(
+                decision.ActiveProfileId,
+                _profilesDocument.BaseProfileId,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                _manualProfileOverrideId = null;
+            }
+            else if (!decision.Changed &&
+                !string.IsNullOrEmpty(
+                    _manualProfileOverrideId))
+            {
+                return;
+            }
+
+            TryApplyActiveGameProfile();
+        }
+
+        private void TryApplyActiveGameProfile()
+        {
+            if (_stopping ||
+                _gameProfileMonitor == null ||
+                _lastV102Reading == null ||
+                _lastV102Reading.ConnectionState !=
+                    DeviceConnectionState.Connected ||
+                DateTime.UtcNow < _gameProfileRetryAfterUtc ||
+                Interlocked.CompareExchange(
+                    ref _gameProfileApplyInFlight,
+                    1,
+                    0) != 0)
+            {
+                return;
+            }
+
+            string profileId =
+                _gameProfileMonitor.ActiveProfileId;
+            V102LightingProfile profile =
+                FindProfile(profileId);
+            if (profile == null ||
+                string.Equals(
+                    _lastAppliedGameProfileId,
+                    profile.Id,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                Interlocked.Exchange(
+                    ref _gameProfileApplyInFlight,
+                    0);
+                return;
+            }
+
+            V102LightingProfile copy = profile.Clone();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool success = false;
+                string error = null;
+                try
+                {
+                    _v102Source.ApplyLightingProfile(copy);
+                    success = true;
+                }
+                catch (Exception exception)
+                {
+                    error = exception.Message;
+                }
+                finally
+                {
+                    Interlocked.Exchange(
+                        ref _gameProfileApplyInFlight,
+                        0);
+                }
+
+                try
+                {
+                    _uiInvoker.BeginInvoke(
+                        new Action(delegate
+                        {
+                            if (_stopping)
+                            {
+                                return;
+                            }
+
+                            if (success)
+                            {
+                                _lastAppliedGameProfileId =
+                                    copy.Id;
+                                _lightingItem.Text =
+                                    "V102 RGB · aktiv: " +
+                                    copy.Name;
+                            }
+                            else
+                            {
+                                _gameProfileRetryAfterUtc =
+                                    DateTime.UtcNow +
+                                    TimeSpan.FromSeconds(15);
+                                _lightingItem.Text =
+                                    "V102 RGB · väntar på anslutning";
+                                Program.LogWorkerException(
+                                    new V102HidException(
+                                        error ?? "unknown error"));
+                            }
+                        }));
+                }
+                catch
+                {
+                    // The tray is shutting down.
+                }
+            });
+        }
+
+        private V102LightingProfile FindProfile(
+            string profileId)
+        {
+            if (_profilesDocument == null ||
+                _profilesDocument.Profiles == null)
+            {
+                return null;
+            }
+
+            foreach (V102LightingProfile profile in
+                _profilesDocument.Profiles)
+            {
+                if (string.Equals(
+                    profile.Id,
+                    profileId,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return profile;
+                }
+            }
+
+            return null;
+        }
+
+        private void HandleProfilesChanged()
+        {
+            _gameProfileMonitor = new GameProfileMonitor(
+                _profilesDocument.Profiles,
+                _profilesDocument.BaseProfileId);
+            _lastAppliedGameProfileId = null;
+            _manualProfileOverrideId = null;
+            _gameProfileRetryAfterUtc = DateTime.MinValue;
+            QueueGameProfileScan();
+        }
+
+        private void ApplyLightingManually(
+            V102LightingProfile profile)
+        {
+            _v102Source.ApplyLightingProfile(profile);
+            try
+            {
+                _uiInvoker.BeginInvoke(new Action(delegate
+                {
+                    if (_stopping)
+                    {
+                        return;
+                    }
+
+                    _lastAppliedGameProfileId = profile.Id;
+                    _manualProfileOverrideId =
+                        string.Equals(
+                            profile.Id,
+                            _profilesDocument.BaseProfileId,
+                            StringComparison.OrdinalIgnoreCase)
+                            ? null
+                            : profile.Id;
+                    _lightingItem.Text =
+                        "V102 RGB · aktiv: " + profile.Name;
+                }));
+            }
+            catch
+            {
+                // The tray is shutting down.
+            }
+        }
+
+        private void OpenLightingWindow()
+        {
+            if (_lightingForm == null ||
+                _lightingForm.IsDisposed)
+            {
+                _lightingForm = new V102LightingForm(
+                    _profileStore,
+                    _profilesDocument,
+                    _v102Source.ReadKeyboardConfig,
+                    ApplyLightingManually,
+                    HandleProfilesChanged);
+                _lightingForm.FormClosed += delegate
+                {
+                    _lightingForm = null;
+                };
+            }
+
+            if (!_lightingForm.Visible)
+            {
+                _lightingForm.Show();
+            }
+            else
+            {
+                _lightingForm.Activate();
+            }
         }
 
         private void StartBatteryWorker()
@@ -823,38 +1298,104 @@ namespace Rat9Battery
                 _lastEstimate,
                 _historyStore.GetRecentSamples(TimeSpan.FromHours(24)));
 
-            Icon newIcon = CreateBatteryIcon(
-                reading.Percentage,
-                reading.IsCharging);
-            _notifyIcon.Icon = newIcon;
+            RefreshTrayPresentation();
 
+            UpdateSmartAlerts(reading, _lastEstimate);
+        }
+
+        private void RefreshTrayPresentation()
+        {
+            int? lowestPercentage = null;
+            bool selectedIsCharging = false;
+
+            if (_lastReading != null &&
+                _lastReading.HasPercentage)
+            {
+                lowestPercentage = _lastReading.Percentage;
+                selectedIsCharging = _lastReading.IsCharging;
+            }
+
+            if (_lastV102Reading != null &&
+                _lastV102Reading.HasPercentage &&
+                (!lowestPercentage.HasValue ||
+                 _lastV102Reading.Percentage.Value <
+                    lowestPercentage.Value))
+            {
+                lowestPercentage =
+                    _lastV102Reading.Percentage;
+                selectedIsCharging =
+                    _lastV102Reading.IsCharging;
+            }
+
+            Icon newIcon = CreateBatteryIcon(
+                lowestPercentage,
+                selectedIsCharging);
+            _notifyIcon.Icon = newIcon;
             if (_currentIcon != null)
             {
                 _currentIcon.Dispose();
             }
 
             _currentIcon = newIcon;
-            _notifyIcon.Text = TrimTooltip(BuildTooltip(
-                reading,
-                _lastEstimate));
-
-            UpdateSmartAlerts(reading, _lastEstimate);
+            _notifyIcon.Text = TrimTooltip(
+                BuildCombinedTooltip());
         }
 
-        private static string BuildTooltip(
-            BatteryReading reading,
-            BatteryTimeEstimate estimate)
+        private string BuildCombinedTooltip()
         {
-            string tooltip = reading.ToDisplayText();
-            string remaining = estimate != null
-                ? estimate.FormatShort()
-                : string.Empty;
-            if (!string.IsNullOrEmpty(remaining))
+            List<string> parts = new List<string>();
+            if (_lastReading != null)
             {
-                tooltip += " · " + remaining;
+                string rat9 = _lastReading.ToDisplayText();
+                string rat9Time = _lastEstimate != null
+                    ? _lastEstimate.FormatShort()
+                    : string.Empty;
+                if (!string.IsNullOrEmpty(rat9Time))
+                {
+                    rat9 += " · " + rat9Time;
+                }
+
+                parts.Add(rat9);
             }
 
-            return tooltip;
+            if (_lastV102Reading != null)
+            {
+                string v102 = FormatV102Reading(
+                    _lastV102Reading);
+                if (_lastV102Estimate != null &&
+                    _lastV102Estimate.HasEstimate)
+                {
+                    v102 += " · " +
+                        _lastV102Estimate.FormatShort();
+                }
+
+                parts.Add(v102);
+            }
+
+            return parts.Count == 0
+                ? "Läser batteridata..."
+                : string.Join(" · ", parts.ToArray());
+        }
+
+        private static string FormatV102Reading(
+            DeviceBatteryReading reading)
+        {
+            if (reading == null || !reading.HasPercentage)
+            {
+                return "V102 Pro: " +
+                    (reading == null || string.IsNullOrEmpty(
+                        reading.Error)
+                        ? "ingen batteridata"
+                        : reading.Error);
+            }
+
+            return "V102 Pro: " +
+                reading.Percentage.Value + "%" +
+                (reading.IsCharging
+                    ? " (laddar)"
+                    : reading.IsFull
+                        ? " (fullt)"
+                        : string.Empty);
         }
 
         private void UpdateSmartAlerts(
@@ -1087,6 +1628,49 @@ namespace Rat9Battery
             }
         }
 
+        private static void EnsureStartupPathCurrent()
+        {
+            try
+            {
+                using (RegistryKey key =
+                    Registry.CurrentUser.OpenSubKey(
+                        RunKey,
+                        true))
+                {
+                    if (key == null)
+                    {
+                        return;
+                    }
+
+                    string configured =
+                        key.GetValue(
+                            RunValueName,
+                            string.Empty) as string;
+                    if (string.IsNullOrWhiteSpace(configured))
+                    {
+                        return;
+                    }
+
+                    string expected =
+                        "\"" + Application.ExecutablePath + "\"";
+                    if (!string.Equals(
+                        configured,
+                        expected,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        key.SetValue(
+                            RunValueName,
+                            expected,
+                            RegistryValueKind.String);
+                    }
+                }
+            }
+            catch
+            {
+                // Autostart is optional.
+            }
+        }
+
         private static bool IsPinned()
         {
             try
@@ -1253,6 +1837,11 @@ namespace Rat9Battery
             _stopping = true;
             _workerWatchdog.Stop();
             _workerWatchdog.Dispose();
+            _v102PollTimer.Stop();
+            _v102PollTimer.Dispose();
+            _gameProfileTimer.Stop();
+            _gameProfileTimer.Dispose();
+            _v102Source.Dispose();
             StopBatteryWorker();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
@@ -1272,6 +1861,10 @@ namespace Rat9Battery
             {
                 _details.Dispose();
             }
+            if (_lightingForm != null)
+            {
+                _lightingForm.Dispose();
+            }
             _menu.Dispose();
             base.ExitThread();
         }
@@ -1284,6 +1877,10 @@ namespace Rat9Battery
         private BatteryTimeEstimate _estimate;
         private IList<BatteryHistorySample> _history =
             new List<BatteryHistorySample>();
+        private DeviceBatteryReading _v102Reading;
+        private V102TimeEstimate _v102Estimate;
+        private IList<V102BatterySample> _v102History =
+            new List<V102BatterySample>();
         private bool _pinned;
         private bool _dragging;
         private Point _dragStart;
@@ -1299,7 +1896,7 @@ namespace Rat9Battery
 
             AutoScaleMode = AutoScaleMode.Dpi;
             BackColor = Color.FromArgb(24, 29, 37);
-            ClientSize = new Size(390, 430);
+            ClientSize = new Size(440, 660);
             DoubleBuffered = true;
             FormBorderStyle = FormBorderStyle.None;
             KeyPreview = true;
@@ -1308,7 +1905,7 @@ namespace Rat9Battery
             ShowIcon = false;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
-            Text = "Mad Catz R.A.T. 9 batteri";
+            Text = "Batteriöversikt";
             TopMost = true;
 
             SetRoundedRegion();
@@ -1333,6 +1930,18 @@ namespace Rat9Battery
             _reading = reading;
             _estimate = estimate;
             _history = history ?? new List<BatteryHistorySample>();
+            Invalidate();
+        }
+
+        public void UpdateV102Reading(
+            DeviceBatteryReading reading,
+            V102TimeEstimate estimate,
+            IList<V102BatterySample> history)
+        {
+            _v102Reading = reading;
+            _v102Estimate = estimate;
+            _v102History =
+                history ?? new List<V102BatterySample>();
             Invalidate();
         }
 
@@ -1472,6 +2081,7 @@ namespace Rat9Battery
             DrawBatterySummary(graphics, accent);
             DrawStatistics(graphics);
             DrawHistory(graphics, accent);
+            DrawV102Summary(graphics);
 
             using (Font footerFont = new Font(
                 "Segoe UI",
@@ -1481,9 +2091,23 @@ namespace Rat9Battery
             using (SolidBrush footerBrush = new SolidBrush(
                 Color.FromArgb(133, 146, 163)))
             {
-                string updated = _reading != null
+                DateTime? latest = null;
+                if (_reading != null)
+                {
+                    latest = _reading.MeasuredAt;
+                }
+                if (_v102Reading != null &&
+                    (!latest.HasValue ||
+                     _v102Reading.MeasuredAtUtc.ToLocalTime() >
+                        latest.Value))
+                {
+                    latest =
+                        _v102Reading.MeasuredAtUtc.ToLocalTime();
+                }
+
+                string updated = latest.HasValue
                     ? "Uppdaterad " +
-                      _reading.MeasuredAt.ToString("HH:mm:ss")
+                      latest.Value.ToString("HH:mm:ss")
                     : "Läser batteridata...";
                 graphics.DrawString(
                     updated,
@@ -1495,7 +2119,7 @@ namespace Rat9Battery
                     _pinned ? "FÄST" : "klick utanför stänger",
                     footerFont,
                     footerBrush,
-                    Width - 124,
+                    Width - 128,
                     Height - 31);
             }
         }
@@ -1519,12 +2143,17 @@ namespace Rat9Battery
                 GraphicsUnit.Point))
             {
                 graphics.DrawString(
-                    "MAD CATZ  R.A.T. 9",
+                    "BATTERI  ·  R.A.T. 9 + V102 PRO",
                     titleFont,
                     titleBrush,
                     24,
                     19);
-                graphics.FillEllipse(dotBrush, 198, 21, 8, 8);
+                graphics.FillEllipse(
+                    dotBrush,
+                    Width - 72,
+                    21,
+                    8,
+                    8);
                 graphics.DrawString(
                     "×",
                     closeFont,
@@ -1834,6 +2463,328 @@ namespace Rat9Battery
                 graphics.DrawString("24 t sedan", axisFont, axisBrush, 24, 385);
                 graphics.DrawString("nu", axisFont, axisBrush, Width - 46, 385);
             }
+        }
+
+        private void DrawV102Summary(Graphics graphics)
+        {
+            Color accent = GetV102AccentColor(_v102Reading);
+            using (Pen separator = new Pen(
+                Color.FromArgb(54, 255, 255, 255),
+                1))
+            {
+                graphics.DrawLine(
+                    separator,
+                    24,
+                    410,
+                    Width - 24,
+                    410);
+            }
+
+            string percentageText =
+                _v102Reading != null &&
+                _v102Reading.HasPercentage
+                    ? _v102Reading.Percentage.Value + "%"
+                    : "--";
+            string status = GetV102StatusText(_v102Reading);
+            string remaining = _v102Estimate != null
+                ? _v102Estimate.FormatShort()
+                : "samlar mätdata";
+
+            using (Font deviceFont = new Font(
+                "Segoe UI",
+                8f,
+                FontStyle.Bold,
+                GraphicsUnit.Point))
+            using (Font percentageFont = new Font(
+                "Segoe UI",
+                25f,
+                FontStyle.Bold,
+                GraphicsUnit.Point))
+            using (Font statusFont = new Font(
+                "Segoe UI",
+                9.5f,
+                FontStyle.Regular,
+                GraphicsUnit.Point))
+            using (Font mutedFont = new Font(
+                "Segoe UI",
+                8.5f,
+                FontStyle.Regular,
+                GraphicsUnit.Point))
+            using (SolidBrush titleBrush = new SolidBrush(
+                Color.FromArgb(180, 192, 208)))
+            using (SolidBrush valueBrush = new SolidBrush(
+                Color.FromArgb(246, 248, 251)))
+            using (SolidBrush accentBrush = new SolidBrush(accent))
+            using (SolidBrush mutedBrush = new SolidBrush(
+                Color.FromArgb(153, 166, 183)))
+            {
+                graphics.DrawString(
+                    "EWEADN V102 PRO  ·  2,4 GHZ",
+                    deviceFont,
+                    titleBrush,
+                    24,
+                    424);
+                graphics.DrawString(
+                    percentageText,
+                    percentageFont,
+                    valueBrush,
+                    20,
+                    442);
+                graphics.DrawString(
+                    status,
+                    statusFont,
+                    accentBrush,
+                    145,
+                    452);
+                graphics.DrawString(
+                    remaining,
+                    mutedFont,
+                    mutedBrush,
+                    145,
+                    476);
+            }
+
+            int left = 24;
+            int top = 500;
+            int width = Width - 48;
+            int height = 7;
+            using (GraphicsPath trackPath = CreateRoundedRectangle(
+                new Rectangle(left, top, width, height),
+                height))
+            using (SolidBrush trackBrush = new SolidBrush(
+                Color.FromArgb(58, 67, 81)))
+            {
+                graphics.FillPath(trackBrush, trackPath);
+            }
+
+            int percentage = _v102Reading != null &&
+                _v102Reading.HasPercentage
+                    ? Math.Max(
+                        0,
+                        Math.Min(
+                            100,
+                            _v102Reading.Percentage.Value))
+                    : 0;
+            int fillWidth = (int)Math.Round(
+                width * percentage / 100.0);
+            if (fillWidth > 0)
+            {
+                using (GraphicsPath fillPath = CreateRoundedRectangle(
+                    new Rectangle(
+                        left,
+                        top,
+                        Math.Max(height, fillWidth),
+                        height),
+                    height))
+                using (SolidBrush fillBrush = new SolidBrush(accent))
+                {
+                    graphics.FillPath(fillBrush, fillPath);
+                }
+            }
+
+            using (Font historyFont = new Font(
+                "Segoe UI",
+                7.5f,
+                FontStyle.Bold,
+                GraphicsUnit.Point))
+            using (SolidBrush mutedBrush = new SolidBrush(
+                Color.FromArgb(129, 143, 161)))
+            {
+                graphics.DrawString(
+                    "V102-HISTORIK  ·  24 TIM",
+                    historyFont,
+                    mutedBrush,
+                    24,
+                    521);
+            }
+
+            Rectangle chart = new Rectangle(
+                24,
+                542,
+                Width - 48,
+                58);
+            using (Pen gridPen = new Pen(
+                Color.FromArgb(32, 255, 255, 255),
+                1))
+            {
+                gridPen.DashStyle = DashStyle.Dot;
+                graphics.DrawLine(
+                    gridPen,
+                    chart.Left,
+                    chart.Top,
+                    chart.Right,
+                    chart.Top);
+                graphics.DrawLine(
+                    gridPen,
+                    chart.Left,
+                    chart.Bottom,
+                    chart.Right,
+                    chart.Bottom);
+            }
+
+            DateTime end = _v102Reading != null
+                ? _v102Reading.MeasuredAtUtc.ToLocalTime()
+                : DateTime.Now;
+            DateTime start = end - TimeSpan.FromHours(24);
+            List<V102BatterySample> samples =
+                new List<V102BatterySample>();
+            foreach (V102BatterySample sample in _v102History)
+            {
+                DateTime local =
+                    sample.TimestampUtc.ToLocalTime();
+                if (local >= start && local <= end)
+                {
+                    samples.Add(new V102BatterySample(
+                        local,
+                        sample.Percentage,
+                        sample.IsCharging));
+                }
+            }
+
+            if (samples.Count == 0 &&
+                _v102Reading != null &&
+                _v102Reading.HasPercentage)
+            {
+                samples.Add(new V102BatterySample(
+                    end,
+                    _v102Reading.Percentage.Value,
+                    _v102Reading.IsCharging));
+            }
+
+            if (samples.Count < 2)
+            {
+                using (Font emptyFont = new Font(
+                    "Segoe UI",
+                    8.5f,
+                    FontStyle.Regular,
+                    GraphicsUnit.Point))
+                using (SolidBrush emptyBrush = new SolidBrush(
+                    Color.FromArgb(145, 158, 175)))
+                {
+                    graphics.DrawString(
+                        _v102Estimate != null &&
+                        _v102Estimate.HasEstimate
+                            ? "Tidsuppskattningen är inlärd."
+                            : "Historiken börjar fyllas automatiskt.",
+                        emptyFont,
+                        emptyBrush,
+                        chart.Left + 8,
+                        chart.Top + 18);
+                }
+            }
+            else
+            {
+                double totalSeconds = Math.Max(
+                    1,
+                    (end - start).TotalSeconds);
+                Point previousPoint = Point.Empty;
+                bool hasPrevious = false;
+                foreach (V102BatterySample sample in samples)
+                {
+                    DateTime timestamp = sample.TimestampUtc;
+                    if (timestamp.Kind == DateTimeKind.Utc)
+                    {
+                        timestamp = timestamp.ToLocalTime();
+                    }
+
+                    int x = chart.Left + (int)Math.Round(
+                        chart.Width *
+                        (timestamp - start).TotalSeconds /
+                        totalSeconds);
+                    int y = chart.Bottom - (int)Math.Round(
+                        chart.Height *
+                        sample.Percentage /
+                        100.0);
+                    Point currentPoint = new Point(x, y);
+                    if (hasPrevious)
+                    {
+                        Color lineColor = sample.IsCharging
+                            ? Color.FromArgb(75, 203, 139)
+                            : accent;
+                        using (Pen dataPen =
+                            new Pen(lineColor, 2f))
+                        {
+                            graphics.DrawLine(
+                                dataPen,
+                                previousPoint,
+                                currentPoint);
+                        }
+                    }
+
+                    previousPoint = currentPoint;
+                    hasPrevious = true;
+                }
+
+                using (SolidBrush pointBrush =
+                    new SolidBrush(accent))
+                {
+                    graphics.FillEllipse(
+                        pointBrush,
+                        previousPoint.X - 3,
+                        previousPoint.Y - 3,
+                        6,
+                        6);
+                }
+            }
+        }
+
+        private static string GetV102StatusText(
+            DeviceBatteryReading reading)
+        {
+            if (reading == null)
+            {
+                return "söker...";
+            }
+
+            if (reading.IsCharging)
+            {
+                return "laddar";
+            }
+
+            if (reading.IsFull)
+            {
+                return "fullt";
+            }
+
+            if (reading.ConnectionState ==
+                DeviceConnectionState.Disconnected)
+            {
+                return "hittades inte";
+            }
+
+            if (reading.ConnectionState ==
+                DeviceConnectionState.Error)
+            {
+                return "kunde inte läsa";
+            }
+
+            return "batteri";
+        }
+
+        private static Color GetV102AccentColor(
+            DeviceBatteryReading reading)
+        {
+            if (reading != null && reading.IsCharging)
+            {
+                return Color.FromArgb(70, 211, 144);
+            }
+
+            if (reading == null || !reading.HasPercentage)
+            {
+                return Color.FromArgb(141, 153, 170);
+            }
+
+            if (reading.Percentage.Value <= 15)
+            {
+                return Color.FromArgb(238, 105, 105);
+            }
+
+            if (reading.Percentage.Value <= 35)
+            {
+                return Color.FromArgb(233, 171, 71);
+            }
+
+            return Color.FromArgb(231, 139, 68);
         }
 
         private static string GetStatusText(BatteryReading reading)

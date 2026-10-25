@@ -1,62 +1,66 @@
-MAD CATZ R.A.T. 9 BATTERY MONITOR
-=================================
+R.A.T. 9 + EWEADN V102 PRO BATTERY MONITOR
+==========================================
 
 QUICK START
 
-1. Make sure Mad Catz SmartTechnology is installed and the R.A.T. 9 works.
-2. Extract the release ZIP to a permanent folder.
-3. Start RAT9BatteryTray.exe.
-4. Left-click the percentage icon in the system tray.
-5. Click outside the detail panel to close it.
+1. Extract the release ZIP to a permanent folder.
+2. Start RAT9BatteryTray.exe.
+3. Left-click the percentage icon in the system tray.
+4. The panel shows the R.A.T. 9 and V102 Pro side by side.
+5. Click outside the panel to close it, or pin it from the tray menu.
 
-The tray icon updates automatically (about every 12 seconds while idle and
-every 5 seconds while charging or below 15%).
+The tray icon shows the lowest connected battery. Charging, disconnecting,
+and the learned time range are shown in the tooltip and detail panel.
 
-If battery-driver access hangs during a battery swap, the monitor automatically
-releases its reader after eight seconds and waits 15 seconds before reconnecting.
-You can also choose "Återanslut musen" from the right-click menu.
+R.A.T. 9 BATTERY SWAPS
 
-BEFORE CHANGING THE BATTERY
-Right-click the tray icon and choose "Batteribyte: pausa läsaren".
-After the new battery is fitted and the mouse is switched on, choose the same
-menu item again. The app then waits ten seconds before resuming battery reads.
+The R.A.T. 9 reader runs in an isolated worker. If a driver read hangs, the
+worker is released and restarted automatically. The tray menu also provides:
 
-NO-REBOOT RECOVERY (OPTIONAL, ONE-TIME UAC)
-Run Install-RAT9-Recovery.cmd once and approve the administrator prompt.
-After installation, the tray app can reset a stuck Mad Catz receiver and filter
-driver without restarting Windows. Manual action:
-"Återställ musanslutningen (admin)"
+- "Batteribyte: pausa läsaren"
+- "Återanslut musen"
+- "Återställ musanslutningen (admin)" when the recovery task is installed
 
-RIGHT-CLICK MENU
+V102 BATTERY
 
-- Open battery details
-- Refresh now
-- Reconnect mouse
-- Battery swap mode
-- Install/reset administrator recovery
-- Pin the detail panel to the desktop
-- Start with Windows
-- Exit
+The V102 Pro is read over the standard HID interface exposed by its 2.4 GHz
+dongle. Run V102BatteryProbe.exe in a terminal to verify battery, charging,
+firmware, device serial, and MAC information.
 
-TIME REMAINING
+V102 LIGHTING AND GAME PROFILES
 
-The first estimate uses the R.A.T. 9's approximate 9-hour maximum gaming
-runtime. The app saves local discharge history and narrows/adjusts the range
-as it learns how the battery is used.
+Right-click the tray icon and choose "V102 RGB och spelprofiler".
 
-ALERTS
+Each profile can set:
 
-The app can notify at 20%, 10%, and 5%, when charging is complete, when the
-mouse disconnects, and when it reconnects.
+- Lighting effect, including static palette colors.
+- Brightness and effect speed.
+- Logo-light color or off.
+- One or more game executable paths.
+
+Choose "Gör till bas" for the profile used outside games. The app scans
+running processes every two seconds without injecting into games. The
+foreground game gets priority, and the base profile is restored when the last
+configured game exits.
+
+V102's official protocol controls global lighting zones. It does not expose
+an addressable per-key RGB matrix.
+
+PROFILE STORAGE
+
+%LOCALAPPDATA%\MadCatzRat9BatteryTray\v102-profiles-v1.json
 
 PRIVACY
 
-No telemetry or network access. History is stored at:
+No telemetry, account, or cloud access is used. Battery history is stored at:
+
 %LOCALAPPDATA%\MadCatzRat9BatteryTray\history-v1.txt
+%LOCALAPPDATA%\MadCatzRat9BatteryTray\v102-history-v1.txt
 
 TROUBLESHOOTING
 
-If the icon is hidden, enable it under:
+If the tray icon is hidden:
 Settings > Personalization > Taskbar > Other system tray icons
 
-Run RAT9BatteryProbe.exe in a terminal for a diagnostic reading.
+If the V102 is missing, unplug and reconnect the 2.4 GHz dongle, then run:
+V102BatteryProbe.exe
